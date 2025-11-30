@@ -3,221 +3,191 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>极简手势-调试增强版</title>
+    <title>极简双手猜数字 (0-10)</title>
     
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
 
     <style>
+        /* 视觉风格保持不变：纯黑极简 */
         body {
             background-color: #000000;
             color: #ffffff;
-            margin: 0; padding: 0;
-            height: 100dvh; width: 100vw;
-            display: flex; flex-direction: column;
-            justify-content: center; align-items: center;
+            margin: 0;
+            padding: 0;
+            height: 100vh; /* 兼容旧浏览器 */
+            height: 100dvh; /* 兼容 iOS Safari 动态地址栏 */
+            width: 100vw;
+            display: flex;
+            justify-content: center;
+            align-items: center;
             overflow: hidden;
-            font-family: monospace; /* 等宽字体方便看调试信息 */
-            user-select: none; -webkit-user-select: none;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            -webkit-user-select: none; /* 禁止 iOS 选中文字 */
+            user-select: none;
         }
 
+        /* 隐藏摄像头画面 */
         .input_video {
-            position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none;
+            position: absolute;
+            width: 1px; height: 1px;
+            opacity: 0; pointer-events: none;
         }
 
+        /* 中央大数字样式 */
         #number-display {
-            font-size: 40vw;
+            font-size: 40vw; /* 字体非常大 */
             font-weight: 700;
-            line-height: 1;
-            transition: all 0.2s;
-            text-shadow: 0 0 20px rgba(255, 255, 255, 0.5);
+            opacity: 0;
+            transform: scale(0.8);
+            /* 平滑过渡动画 */
+            transition: opacity 0.3s ease, transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            text-shadow: 0 0 30px rgba(255, 255, 255, 0.3);
+            cursor: default;
         }
 
-        /* 调试条：显示当前识别到的手指状态 */
-        #debug-bar {
-            position: absolute; top: 10px;
-            font-size: 14px; color: #00ff00;
-            background: rgba(0,0,0,0.8);
-            padding: 5px; border-radius: 5px;
-            white-space: pre;
-            text-align: center;
-            z-index: 100;
+        /* 激活状态 */
+        #number-display.active {
+            opacity: 1;
+            transform: scale(1);
         }
 
-        #gesture-name {
-            position: absolute; bottom: 80px;
-            font-size: 20px; color: #aaa;
-            font-family: sans-serif;
-        }
-
+        /* 加载提示 */
         #loading {
-            position: absolute; bottom: 30px;
-            font-size: 12px; color: #666;
-            animation: pulse 1s infinite;
+            position: absolute; bottom: 40px;
+            font-size: 14px; color: #666;
+            text-align: center; width: 100%;
+            animation: pulse 1.5s infinite ease-in-out;
         }
-        @keyframes pulse { 0%{opacity:0.5} 50%{opacity:1} 100%{opacity:0.5} }
+        @keyframes pulse { 0% {opacity:0.4} 50% {opacity:1} 100% {opacity:0.4} }
     </style>
 </head>
 <body>
 
     <video class="input_video" playsinline webkit-playsinline muted autoplay></video>
 
-    <div id="debug-bar">等待摄像头...</div>
-    
     <div id="number-display"></div>
-    <div id="gesture-name"></div>
-    <div id="loading">初始化中...</div>
+    <div id="loading">正在启动双手识别引擎...<br><span style="font-size:12px">请允许相机权限</span></div>
 
     <script>
         const videoElement = document.getElementsByClassName('input_video')[0];
         const displayElement = document.getElementById('number-display');
-        const debugBar = document.getElementById('debug-bar');
-        const gestureName = document.getElementById('gesture-name');
         const loadingElement = document.getElementById('loading');
         
-        // 关键点映射
-        // 0:腕, 4:拇指尖, 8:食指尖, 12:中指尖, 16:无名指尖, 20:小指尖
-        // 5,9,13,17: 手指根部(MCP)
+        let lastNumber = -1; // 用于防抖动
+
+        // --- 核心逻辑修改区 开始 ---
 
         function onResults(results) {
-            loadingElement.style.display = 'none';
+            // 隐藏加载提示
+            if(loadingElement.style.display !== 'none') loadingElement.style.display = 'none';
 
+            // 检查是否检测到任何手
             if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-                // 取第一只手（为了稳定，暂时只处理单手逻辑调试）
-                const landmarks = results.multiHandLandmarks[0];
                 
-                // 1. 获取五指状态 [拇, 食, 中, 无, 小] (true=直, false=弯)
-                const fingers = getFingerStates(landmarks);
-                
-                // 2. 更新调试条 (关键！)
-                // 显示类似: "1 0 0 0 1" (表示6)
-                const debugText = fingers.map(f => f ? "1" : "0").join(" ");
-                debugBar.innerText = `手指状态: [ ${debugText} ]\n(拇 食 中 无 小)`;
+                let totalFingers = 0;
 
-                // 3. 判断数字
-                const number = identifyChineseNumber(fingers, landmarks);
+                // 【关键修改】循环遍历所有检测到的手（可能是1只，也可能是2只）
+                for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                    const landmarks = results.multiHandLandmarks[i];
+                    // 获取对应这只手的标签（左手还是右手）用于辅助判断拇指
+                    const handedness = results.multiHandedness[i].label;
+                    
+                    // 调用计算单手手指的函数，并累加到总数
+                    totalFingers += countSingleHandFingers(landmarks, handedness);
+                }
                 
-                displayElement.innerText = number;
-                
-                // 辅助显示手势名称
-                if (number === 6) gestureName.innerText = "手势: 六 (6)";
-                else if (number === 7) gestureName.innerText = "手势: 七 (7)";
-                else if (number === 8) gestureName.innerText = "手势: 八 (8)";
-                else if (number === 9) gestureName.innerText = "手势: 九 (9)";
-                else gestureName.innerText = "";
+                // 更新屏幕显示总数
+                updateDisplay(totalFingers);
 
             } else {
-                displayElement.innerText = "";
-                debugBar.innerText = "未检测到手";
-                gestureName.innerText = "";
+                // 没有检测到手，隐藏数字
+                hideDisplay();
             }
         }
 
-        // === 改进的手指状态检测算法 ===
-        function getFingerStates(lm) {
-            // lm = landmarks 数组
-            
-            // 判断手指 2,3,4,5 (食指到小指)
-            // 逻辑：指尖(Tip) 到 掌心(0) 的距离 > 指根(MCP) 到 掌心(0) 的距离
-            // 这种距离法比单纯对比 Y 轴更抗旋转
-            const mcpIds = [5, 9, 13, 17];
-            const tipIds = [8, 12, 16, 20];
-            
-            let states = [false, false, false, false, false];
+        // 这个函数只负责计算“一只手”伸出了几个手指 (逻辑不变)
+        function countSingleHandFingers(landmarks, handLabel) {
+            let count = 0;
+            // 食指到小指的指尖和关节索引
+            const tipsIds = [8, 12, 16, 20];
+            const pipIds = [6, 10, 14, 18];
 
-            // 检查食指到小指
+            // 判断食指到小指 (通过 Y 轴高度比较)
             for (let i = 0; i < 4; i++) {
-                // 计算距离平方 (避免开根号，性能更好)
-                const distTip = getDistSq(lm[tipIds[i]], lm[0]); // 指尖到手腕
-                const distMcp = getDistSq(lm[mcpIds[i]], lm[0]); // 指根到手腕
-                
-                // 如果指尖距离手腕 明显远于 指根距离手腕，说明伸直了
-                // 系数 1.2 是为了容错，稍微弯一点点也算伸直
-                if (distTip > distMcp * 1.2) {
-                    states[i+1] = true;
+                // 注意：画面坐标系中，Y轴向下是正方向。指尖比关节Y值小意味着手指是向上的。
+                if (landmarks[tipsIds[i]].y < landmarks[pipIds[i]].y) {
+                    count++;
                 }
             }
 
-            // 检查拇指 (难点)
-            // 逻辑：拇指尖(4) 到 小指根(17) 的距离
-            // 如果伸出，距离远；如果弯曲，距离近。
-            const thumbTip = lm[4];
-            const pinkyMcp = lm[17];
-            const indexMcp = lm[5];
-
-            const distThumbPinky = getDistSq(thumbTip, pinkyMcp);
-            const distIndexPinky = getDistSq(indexMcp, pinkyMcp); // 作为参考长度
-
-            // 如果拇指尖到小指根的距离 > 食指根到小指根的距离，通常是张开的
-            if (distThumbPinky > distIndexPinky) {
-                states[0] = true;
-            }
-
-            return states;
-        }
-
-        // 计算两点距离平方
-        function getDistSq(p1, p2) {
-            return (p1.x - p2.x)**2 + (p1.y - p2.y)**2;
-        }
-
-        // === 中国数字识别逻辑 ===
-        function identifyChineseNumber(f, lm) {
-            // f 是一个布尔数组 [拇, 食, 中, 无, 小]
+            // 判断拇指 (通过 X 轴水平位置比较，依赖左右手标签)
+            const thumbTip = landmarks[4].x;
+            const thumbIP = landmarks[3].x;
             
-            // 基础数量 (有多少根手指是真的直的)
-            const count = f.filter(Boolean).length;
-
-            // --- 特殊判定 ---
-
-            // 6: 拇指(T) + 小指(T)，中间三个(F)
-            if (f[0] && f[4] && !f[1] && !f[2] && !f[3]) return 6;
-
-            // 8: 拇指(T) + 食指(T)，其他(F)
-            if (f[0] && f[1] && !f[2] && !f[3] && !f[4]) return 8;
-            
-            // 7: 拇指(T) + 食指(T) + 中指(T) 
-            // 或者是"捏指"？捏指时 fingers 全是 false。
-            // 既然难以识别捏指，我们强制定义 7 为 "三指张开"
-            if (f[0] && f[1] && f[2] && !f[3] && !f[4]) return 7;
-
-            // 9: 勾指。
-            // 特征：所有手指看起来都是弯的(count=0 或 1)，但食指形态特殊。
-            // 简化版：如果全弯(类似拳头)，但食指的指根(5)位置很高，判定为9。
-            // 或者：为了体验，我们定义 9 为：除了无名指，其他都伸直？(不，这不符合习惯)
-            // 让我们用一个简单的“排除法”：
-            // 如果看起来像拳头(count=0)，且食指的第二关节(6)是所有手指关节中最高的(y最小)，判定为9。
-            if (count === 0 || (count === 1 && f[1])) {
-                 // 获取四个手指第二关节的 Y 坐标 (注意Y向下为正)
-                 const pips = [lm[6].y, lm[10].y, lm[14].y, lm[18].y];
-                 const minPip = Math.min(...pips); // 找最高点
-                 
-                 // 如果食指关节(index=0 in pips)是最高的
-                 if (pips[0] === minPip) {
-                     // 还要确保不是完全的拳头，食指得稍微突出来一点
-                     // 这里为了容易触发，直接假设如果你握拳并把食指翘高一点，就是9
-                     return 9;
-                 }
-                 return 0; // 否则就是0
+            // MediaPipe 前置摄像头默认是镜像的。
+            // 如果识别为 Right(画面左侧的手)，伸出时指尖X小于关节X。
+            if (handLabel === 'Right') {
+               if (thumbTip < thumbIP) count++;
+            } else {
+               // 如果识别为 Left(画面右侧的手)，伸出时指尖X大于关节X。
+               if (thumbTip > thumbIP) count++;
             }
 
             return count;
         }
+        // --- 核心逻辑修改区 结束 ---
 
-        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+
+        // 更新 UI 显示 (带简单的防抖)
+        function updateDisplay(number) {
+            if (number !== lastNumber) {
+                lastNumber = number;
+                displayElement.innerText = number;
+                displayElement.classList.add('active');
+            }
+            // 确保动画类存在
+            if (!displayElement.classList.contains('active')) {
+                displayElement.classList.add('active');
+            }
+        }
+
+        // 隐藏 UI
+        function hideDisplay() {
+            displayElement.classList.remove('active');
+            // 延迟重置状态，让淡出动画完成
+            setTimeout(() => {
+                if(!displayElement.classList.contains('active')) {
+                   lastNumber = -1;
+                }
+            }, 350);
+        }
+
+        // 初始化 MediaPipe Hands
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+
         hands.setOptions({
-            maxNumHands: 1, // 先专注调通单手
-            modelComplexity: 1,
-            minDetectionConfidence: 0.5,
-            minTrackingConfidence: 0.5
+            maxNumHands: 2, // 【关键修改】这里改成了 2，允许识别两只手
+            modelComplexity: 1, // 性能与精度的平衡模式
+            minDetectionConfidence: 0.6,
+            minTrackingConfidence: 0.6
         });
+
         hands.onResults(onResults);
 
+        // 初始化摄像头 (针对手机前置优化)
         const camera = new Camera(videoElement, {
-            onFrame: async () => await hands.send({image: videoElement}),
-            width: 640, height: 480, facingMode: 'user'
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 1280,
+            height: 720,
+            facingMode: 'user' // 强制使用前置镜头
         });
+
         camera.start();
     </script>
 </body>
