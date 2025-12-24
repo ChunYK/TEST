@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Merry Christmas - Camera & Star Fix</title>
+    <link href="https://fonts.googleapis.com/css2?family=Great+Vibes&display=swap" rel="stylesheet">
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Segoe UI', sans-serif; }
+        
+        #input_video {
+            display: none;
+        }
+    </style>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body class="bg-black">
+
+    <video id="input_video" style="display:none;"></video>
+
+    <!-- Shader -->
+    <script type="x-shader/x-vertex" id="vertexshader">
+        attribute float size;
+        attribute vec3 customColor;
+        attribute vec3 spherePos; 
+        attribute float type;     
+        varying vec3 vColor; varying float vType;
+        uniform float uTime; uniform float uExplosion; uniform float uBeat;      
+        void main() {
+            vColor = customColor; vType = type;
+            float t = uExplosion;
+            float ease = 1.0 - pow(1.0 - t, 3.0);
+            vec3 finalPos = mix(position, spherePos, ease);
+            float beatScale = 1.0;
+            if (t < 0.2) beatScale += uBeat * 0.15 * (1.0 - t*3.0); 
+            if (type > 0.5) beatScale += uBeat * 0.2; 
+            vec4 mvPosition = modelViewMatrix * vec4(finalPos * beatScale, 1.0);
+            float s = size;
+            if(type > 0.5) s *= (1.0 + uBeat * 0.5);
+            gl_PointSize = s * (300.0 / -mvPosition.z);
+            gl_Position = projectionMatrix * mvPosition;
+        }
+    </script>
+    <script type="x-shader/x-fragment" id="fragmentshader">
+        uniform float uTime; uniform float uBeat;
+        varying vec3 vColor; varying float vType;
+        void main() {
+            vec2 coord = gl_PointCoord - vec2(0.5);
+            if(length(coord) > 0.5) discard;
+            vec3 color = vColor; float alpha = 1.0;
+            if(vType > 0.5) {
+                float flash = 0.5 + 0.5 * sin(uTime * 5.0 + vType * 10.0);
+                color += vec3(0.5) * flash * uBeat * 2.0;
+            } else { alpha = 0.8; }
+            gl_FragColor = vec4(color, alpha);
+        }
+    </script>
+
+    <script>
+        const state = {
+            explosion: 0.0,
+            targetExplosion: 0.0,
+            treeHeight: 70,
+            rotationSpeed: 0.002
+        };
+
+        let scene, camera, renderer, clock;
+        let particleSystem, treeGroup, starMesh;
+        let audioCtx, analyser, dataArray, audioEl;
+        let snowTrails = [];
+        
+        initAudio();
+        initThree();
+        startHandTracking();
+
+        function initAudio() {
+            audioEl = new Audio();
+            audioEl.crossOrigin = "anonymous";
+            audioEl.src = "https://thirdparty.gtimg.com/C1000007bNrR1HXkjD.m4a?fromtag=38";
+            audioEl.loop = true;
+            
+            const AudioContext = window.AudioContext || window.webkitAudioContext;
+            audioCtx = new AudioContext();
+            analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 256;
+            dataArray = new Uint8Array(analyser.frequencyBinCount);
+            
+            const source = audioCtx.createMediaElementSource(audioEl);
+            source.connect(analyser);
+            analyser.connect(audioCtx.destination);
+            
+            audioEl.play().catch(e => console.log("需要交互", e));
+        }
+
+        function initThree() {
+            clock = new THREE.Clock();
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x000000, 0.004);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 30, 90);
+            camera.lookAt(0, 30, 0);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            treeGroup = new THREE.Group();
+            scene.add(treeGroup);
+
+            createParticles();
+            createStar();
+            createSnow();
+            animate();
+        }
+
+        function createParticles() {
+            if(particleSystem) { treeGroup.remove(particleSystem); particleSystem.geometry.dispose(); }
+            const count = 18000;
+            const geo = new THREE.BufferGeometry();
+            const positions = [], spherePos = [], colors = [], sizes = [], types = [];
+            const h = state.treeHeight;
+            const colorHelper = new THREE.Color();
+
+            for(let i=0; i<count; i++) {
+                const y = (i/count) * h;
+                const rBase = (1 - y/h) * (h*0.4);
+                const angle = i * 0.2;
+                const r = rBase * Math.sqrt(Math.random());
+                positions.push(Math.cos(angle)*r, y - 10, Math.sin(angle)*r);
+
+                const v = new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5).normalize();
+                v.multiplyScalar(40 + Math.random()*50);
+                spherePos.push(v.x, v.y + 20, v.z);
+
+                const rnd = Math.random();
+                if(rnd > 0.96) { types.push(2); sizes.push(4); colorHelper.setHex(0xffaa00); }
+                else if(rnd > 0.92) { types.push(1); sizes.push(3); colorHelper.setHex(Math.random()>0.5?0xff0000:0x00aaff); }
+                else { types.push(0); sizes.push(1.5); colorHelper.setHex(0x228b22); }
+                
+                colors.push(colorHelper.r, colorHelper.g, colorHelper.b);
+            }
+
+            geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            geo.setAttribute('spherePos', new THREE.Float32BufferAttribute(spherePos, 3));
+            geo.setAttribute('customColor', new THREE.Float32BufferAttribute(colors, 3));
+            geo.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
+            geo.setAttribute('type', new THREE.Float32BufferAttribute(types, 1));
+
+            state.uniforms = { uTime: { value: 0 }, uExplosion: { value: 0 }, uBeat: { value: 0 } };
+            const mat = new THREE.ShaderMaterial({
+                uniforms: state.uniforms, vertexShader: document.getElementById('vertexshader').textContent,
+                fragmentShader: document.getElementById('fragmentshader').textContent,
+                blending: THREE.AdditiveBlending, depthTest: false, transparent: true
+            });
+
+            particleSystem = new THREE.Points(geo, mat);
+            treeGroup.add(particleSystem);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const t = clock.getElapsedTime();
+            let beat = 0;
+            if(analyser) {
+                analyser.getByteFrequencyData(dataArray);
+                let sum = 0; for(let i=0; i<15; i++) sum+=dataArray[i];
+                beat = (sum/15/255) * 1.0;
+            }
+
+            if(state.uniforms) {
+                state.uniforms.uTime.value = t;
+                state.uniforms.uBeat.value = beat;
+                state.explosion += (state.targetExplosion - state.explosion) * 0.05;
+                state.uniforms.uExplosion.value = state.explosion;
+            }
+
+            treeGroup.rotation.y += state.rotationSpeed + state.explosion * 0.01;
+
+            if(starMesh) { starMesh.rotation.y -= 0.02; const s = 1 + beat * 0.3; starMesh.scale.set(s,s,s); }
+            if(window.snowSystem) {
+                const pos = window.snowSystem.geometry.attributes.position.array;
+                
+                // 更新雪花并添加拖尾
+                if(window.snowTrailSystem) {
+                    const trailPos = window.snowTrailSystem.geometry.attributes.position.array;
+                    const trailAlpha = window.snowTrailSystem.geometry.attributes.alpha.array;
+                    
+                    for(let i=0; i<pos.length; i+=3) {
+                        // 添加拖尾粒子 - 增加概率和透明度让效果更明显
+                        if(Math.random() < 0.2 && window.trailParticles.length < 800) {
+                            const snowX = pos[i];
+                            const snowY = pos[i+1];
+                            const snowZ = pos[i+2];
+                            
+                            // 拖尾粒子位置在雪花上方一点点，不会超出太远
+                            window.trailParticles.push({
+                                x: snowX + (Math.random() - 0.5) * 0.5,
+                                y: snowY + 0.3 + Math.random() * 0.3,
+                                z: snowZ + (Math.random() - 0.5) * 0.5,
+                                life: 1.0,
+                                index: window.trailIndex
+                            });
+                            
+                            trailPos[window.trailIndex] = window.trailParticles[window.trailParticles.length - 1].x;
+                            trailPos[window.trailIndex + 1] = window.trailParticles[window.trailParticles.length - 1].y;
+                            trailPos[window.trailIndex + 2] = window.trailParticles[window.trailParticles.length - 1].z;
+                            trailAlpha[window.trailIndex / 3] = 0.8;
+                            window.trailIndex = (window.trailIndex + 3) % trailPos.length;
+                        }
+                        
+                        // 更新雪花位置
+                        pos[i+1] -= 0.3;
+                        if(pos[i+1] < -20) pos[i+1] = 100;
+                    }
+                    
+                    // 更新拖尾粒子
+                    for(let i = window.trailParticles.length - 1; i >= 0; i--) {
+                        const trail = window.trailParticles[i];
+                        trail.life -= 0.005;
+                        trail.y -= 0.08;
+                        
+                        // 更新位置数组
+                        const idx = trail.index;
+                        trailPos[idx] = trail.x;
+                        trailPos[idx + 1] = trail.y;
+                        trailPos[idx + 2] = trail.z;
+                        trailAlpha[idx / 3] = trail.life * 0.8;
+                        
+                        // 移除消失的拖尾
+                        if(trail.life <= 0) {
+                            trailAlpha[idx / 3] = 0;
+                            window.trailParticles.splice(i, 1);
+                        }
+                    }
+                    
+                    window.snowTrailSystem.geometry.attributes.position.needsUpdate = true;
+                    window.snowTrailSystem.geometry.attributes.alpha.needsUpdate = true;
+                } else {
+                    for(let i=1; i<pos.length; i+=3) { pos[i] -= 0.3; if(pos[i]<-20) pos[i]=100; }
+                }
+                
+                window.snowSystem.geometry.attributes.position.needsUpdate = true;
+            }
+            renderer.render(scene, camera);
+        }
+
+        function startHandTracking() {
+            const video = document.getElementById('input_video');
+            const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+            hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+            
+            hands.onResults(results => {
+                let leftFound = false;
+
+                if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                    for (let i = 0; i < results.multiHandedness.length; i++) {
+                        const label = results.multiHandedness[i].label; // "Left" or "Right"
+                        const lm = results.multiHandLandmarks[i];
+
+                        if (label === 'Left') {
+                            leftFound = true;
+                            const d = Math.hypot(lm[4].x - lm[20].x, lm[4].y - lm[20].y);
+                            state.targetExplosion = Math.min(Math.max((d - 0.15) * 4, 0), 1);
+                        }
+                    }
+                }
+
+                if (!leftFound) state.targetExplosion = 0;
+            });
+
+            const cameraUtils = new Camera(video, { onFrame: async () => { await hands.send({image: video}); }, width: 320, height: 240 });
+            cameraUtils.start();
+        }
+
+        function createStar() {
+            const s=new THREE.Shape(); const p=5; for(let i=0;i<p*2;i++){ const r=(i%2===0)?4:2; const a=i/p*Math.PI; s.lineTo(Math.cos(a)*r,Math.sin(a)*r); }
+            const g=new THREE.ExtrudeGeometry(s,{depth:1,bevelEnabled:true,bevelThickness:0.5,bevelSize:0.2});
+            starMesh=new THREE.Mesh(g,new THREE.MeshBasicMaterial({color:0xffdd00}));
+            // 修正：初始创建时也紧贴树顶
+            starMesh.position.y=state.treeHeight; 
+            treeGroup.add(starMesh);
+        }
+        function createSnow() {
+            const g=new THREE.BufferGeometry(); const pos=[]; for(let i=0;i<1000;i++) pos.push((Math.random()-0.5)*200,Math.random()*150,(Math.random()-0.5)*200);
+            g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+            
+            // 创建圆形纹理
+            const canvas = document.createElement('canvas');
+            canvas.width = 32; canvas.height = 32;
+            const ctx = canvas.getContext('2d');
+            ctx.beginPath();
+            ctx.arc(16, 16, 14, 0, Math.PI * 2);
+            ctx.fillStyle = 'white';
+            ctx.fill();
+            const texture = new THREE.CanvasTexture(canvas);
+            
+            window.snowSystem=new THREE.Points(g,new THREE.PointsMaterial({
+                map: texture,
+                color:0xffffff,
+                size:0.6,
+                transparent:true,
+                opacity:0.6,
+                depthWrite: false,
+                blending: THREE.AdditiveBlending
+            }));
+            scene.add(window.snowSystem);
+            
+            // 创建拖尾粒子系统 - 更小、更淡、数量适中
+            const trailCount = 800;
+            const trailGeo = new THREE.BufferGeometry();
+            const trailPos = new Float32Array(trailCount * 3);
+            const trailAlpha = new Float32Array(trailCount);
+            trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPos, 3));
+            trailGeo.setAttribute('alpha', new THREE.BufferAttribute(trailAlpha, 1));
+            
+            window.snowTrailSystem = new THREE.Points(trailGeo, new THREE.PointsMaterial({
+                map: texture,
+                color: 0xffffff,
+                size: 0.15,
+                transparent: true,
+                depthWrite: false,
+                blending: THREE.AdditiveBlending
+            }));
+            scene.add(window.snowTrailSystem);
+            
+            window.trailParticles = [];
+            window.trailIndex = 0;
+        }
+    </script>
+</body>
+</html>
